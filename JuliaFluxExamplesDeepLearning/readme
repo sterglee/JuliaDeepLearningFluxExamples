@@ -1,5 +1,3 @@
 The complete zipped file including the data sets for the TransformersForBreastCancer.jl and CUDATransformersForBreastCancer.jl can be obtained from:
 
 https://drive.google.com/drive/my-drive?dmr=1&ec=wgc-drive-%5Bmodule%5D-goto
-
-Extract the zipped file within the folder containing the Julia code as of data\ and models\ are the top most extracted folders.
