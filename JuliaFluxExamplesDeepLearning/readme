@@ -1,9 +1,3 @@
-To run TransformerForBrasetCancer.jl and CUDATransformerForBreastCancer.jl download first the ndatasets:
+The complete zipped file including the data sets for the TransformersForBreastCancer.jl and CUDATransformersForBreastCancer.jl can be obtained from:
 
-
-https://www.kaggle.com/datasets/sabahesaraki/breast-ultrasound-images-dataset?resource=download
-
-https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset
-
-Then extract them at the directory named "data/" at the folder that you run the code.
-
+https://sourceforge.net/projects/jbioalgorithms/files/
