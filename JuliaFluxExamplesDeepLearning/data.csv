@@ -1,0 +1,23 @@
+image,label
+data\Dataset_BUSI_with_GT\benign\benign (1).png,1
+data\Dataset_BUSI_with_GT\benign\benign (2).png,1
+data\Dataset_BUSI_with_GT\benign\benign (3).png,1
+data\Dataset_BUSI_with_GT\benign\benign (4).png,1
+data\Dataset_BUSI_with_GT\benign\benign (7).png,1
+data\Dataset_BUSI_with_GT\malignant\malignant (1).png,2
+data\Dataset_BUSI_with_GT\malignant\malignant (2).png,2
+data\Dataset_BUSI_with_GT\malignant\malignant (3).png,2
+data\Dataset_BUSI_with_GT\malignant\malignant (4).png,2
+data\Dataset_BUSI_with_GT\malignant\malignant (5).png,2
+data\Dataset_BUSI_with_GT\malignant\malignant (6).png,2
+data\Dataset_BUSI_with_GT\malignant\malignant (7).png,2
+data\Dataset_BUSI_with_GT\normal\normal (1).png,0
+data\Dataset_BUSI_with_GT\normal\normal (2).png,0
+data\Dataset_BUSI_with_GT\normal\normal (3).png,0
+data\Dataset_BUSI_with_GT\normal\normal (4).png,
+data\Dataset_BUSI_with_GT\normal\normal (5).png,0
+data\Dataset_BUSI_with_GT\normal\normal (6).png,0
+data\Dataset_BUSI_with_GT\normal\normal (7).png,0
+
+
+
