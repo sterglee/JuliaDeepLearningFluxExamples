@@ -1,96 +1,118 @@
-using LinearAlgebra, Random, Distributions, Plots, Clustering
+using LinearAlgebra
+using Plots
+using Distributions
 
-# --- Data Configuration ---
-N1, N2 = 100, 20
-N = N1 + N2
-K, l = 2, 2
-Random.seed!(0)
+# -------------------------------
+# 1. Error ellipse / ellipsoid
+# -------------------------------
+function error_ellipse(C::AbstractMatrix; mu=nothing, conf=0.95, scale=1.0, style=:blue, clip=Inf)
+  # Validate covariance
+  r, c = size(C)
+  if r != c || !(r in (2, 3))
+    error("C must be 2x2 or 3x3 covariance matrix")
+  end
+  if any(real(eigvals(C)) .<= 0)
+    error("Covariance matrix must be positive definite")
+  end
 
-# Define True Gaussians
-mu_true = [0.9 1.02; -1.2 -1.3]
-Sigma1 = [0.5 0.081; 0.081 0.7]
-Sigma2 = [0.4 0.02; 0.02 0.3]
+  # Mean
+  μ = isnothing(mu) ? zeros(r) : mu
 
-# Generate Samples
-x1 = rand(MvNormal(mu_true[:, 1], Sigma1), N1)'
-x2 = rand(MvNormal(mu_true[:, 2], Sigma2), N2)'
-X = collect(hcat(x1', x2')) # Data matrix: l x N
+  # Chi-square quantile for confidence (k is the scaling factor)
+  # For r=2, 95% confidence corresponds to k ≈ 2.447
+  k = sqrt(quantile(Chisq(r), conf))
 
-# Colors
-marker_color = [:red, :black, :gray]
+  # Eigen decomposition
+  # eigv contains eigenvalues, eigvec contains orthogonal eigenvectors
+  eigv, eigvec = eigen(C)
 
-# --- 1. Plot Generated Data ---
-p1 = scatter(x1[:,1], x1[:,2], mc=marker_color[2], label="True G1", ratio=:equal, title="Raw Data")
-scatter!(x2[:,1], x2[:,2], mc=marker_color[1], label="True G2")
+  # Transformation matrix: Rotate by eigenvectors and scale by sqrt of eigenvalues
+  # T = eigenvectors * diag(sqrt(eigenvalues))
+  T = eigvec * diagonal(sqrt.(max.(0, eigv)))
 
-# --- 2. K-means Algorithm ---
-# Clustering.jl expects data where each column is an observation
-result_km = kmeans(X, K)
-bel = assignments(result_km) # Cluster labels
+  if r == 2
+    # 2D ellipse
 
-p2 = scatter(ratio=:equal, title="K-means Result")
-for k in 1:K
-  scatter!(X[1, bel.==k], X[2, bel.==k], mc=marker_color[k], label="Cluster $k")
-end
-
-# --- 3. EM Algorithm Setup ---
-
-
-NofIter = 300
-conf = 0.8
-Pk = fill(1/K, K)
-mu = randn(l, K)
-Sigmak = [Matrix(1.0I, l, l) for _ in 1:K]
-  gammakn = zeros(K, N)
-
-  # Function to plot confidence ellipses (Helper)
-  function plot_ellipse!(mu_vec, Sigma_mat; conf=0.8, color=:red)
-    # Get quantile for chi-square with 2 DoF
-    k_scale = sqrt(quantile(Chisq(2), conf))
-    eg = eigen(Sigma_mat)
     θ = range(0, 2π, length=100)
-    circle = [cos.(θ)'; sin.(θ)']
-    # Transform: eigvec * sqrt(eigval) * unit_circle
-    ellipse = (eg.vectors * Diagonal(sqrt.(max.(0, eg.values))) * circle) .* k_scale
-    plot!(ellipse[1,:] .+ mu_vec[1], ellipse[2,:] .+ mu_vec[2], c=color, label="", lw=1.5)
-  end
+    # Unit circle
+    unit_circle = [cos(t) for t in θ, j in 1:1] # shape (100, 1)
+      unit_circle = hcat([cos(t) for t in θ], [sin(t) for t in θ])' # 2x100 matrix
 
-  # --- 4. EM Algorithm Iteration ---
-  for i in 1:NofIter
-    # E-step: Responsibilities
-    for k in 1:K
-      dist = MvNormal(mu[:, k], Symmetric(Sigmak[k]))
-      gammakn[k, :] = Pk[k] .* pdf(dist, X)
-    end
-    # Normalize across clusters (columns)
-    sum_gamma = sum(gammakn, dims=1)
-    gammakn ./= (sum_gamma .+ 1e-15)
+        # Transform unit circle to error ellipse
+        # points = μ + k * T * unit_circle
+        xy = μ .+ (k * scale .* (T * unit_circle))
 
-    # M-step: Update Parameters
-    Nk = vec(sum(gammakn, dims=2))
-    for k in 1:K
-      if Nk[k] > 1e-5
-        # Update Mean
-        mu[:, k] = (X * gammakn[k, :]) ./ Nk[k]
+        X = xy[1, :]
+        Y = xy[2, :]
 
-        # Update Covariance
-        diff = X .- mu[:, k]
-        # Weighted outer product
-        Sigmak[k] = ((diff .* reshape(gammakn[k, :], 1, N)) * diff') ./ Nk[k]
-        Sigmak[k] += 1e-5 * I # Regularization
-      end
-    end
-    Pk = Nk ./ N
-  end
+        # Optional clipping
+        r_dist = sqrt.((X .- μ[1]).^2 .+ (Y .- μ[2]).^2)
+        X[r_dist .> clip] .= NaN
+        Y[r_dist .> clip] .= NaN
 
-  # --- 5. Plot EM Results ---
-  p3 = scatter(x1[:,1], x1[:,2], mc=marker_color[2], alpha=0.5, label="Raw G1", ratio=:equal, title="EM Result")
-  scatter!(x2[:,1], x2[:,2], mc=marker_color[1], alpha=0.5, label="Raw G2")
+        plt = plot(X, Y, color=style, label="Conf: $conf", lw=2, aspect_ratio=:equal,
+                   xlabel="X", ylabel="Y", title="2D Error Ellipse", legend=true)
+        return plt
 
-  for k in 1:K
-    plot_ellipse!(mu[:, k], Sigmak[k], conf=conf, color=:blue)
-  end
+        elseif r == 3
+        # 3D ellipsoid
 
-  # Display all plots
-  plot(p1, p2, p3, layout=(1, 3), size=(1000, 350))
+        u = range(0, 2π, length=50)
+        v = range(0, π, length=50)
+
+        # Unit sphere coordinates
+        xs = [cos(ui)*sin(vi) for vi in v, ui in u]
+          ys = [sin(ui)*sin(vi) for vi in v, ui in u]
+            zs = [cos(vi) for vi in v, ui in u]
+
+              # Flatten for matrix multiplication: (3 x 2500)
+              unit_sphere = vcat(vec(xs)', vec(ys)', vec(zs)')
+
+              # Transform unit sphere
+              # points = μ + k * T * unit_sphere
+              xyz = μ .+ (k * scale .* (T * unit_sphere))
+
+              # Reshape back to grid for surface plotting
+              X = reshape(xyz[1, :], length(v), length(u))
+              Y = reshape(xyz[2, :], length(v), length(u))
+              Z = reshape(xyz[3, :], length(v), length(u))
+
+              plt = surface(X, Y, Z, alpha=0.5, color=style, aspect_ratio=:equal,
+                            xlabel="X", ylabel="Y", zlabel="Z", title="3D Error Ellipsoid")
+              return plt
+            end
+          end
+
+          # -------------------------------
+          # 2. Main script
+          # -------------------------------
+          function main()
+            # Ensure plots are displayed in a window
+            gr()
+
+            println("=== 2D Error Ellipse Example ===")
+            # Defining a tilted covariance matrix
+            C2 = [2.0 0.8; 0.8 1.0]
+            μ2 = [1.0, 2.0]
+            plt2 = error_ellipse(C2, mu=μ2, conf=0.95, style=:red)
+            # Add the center point
+            scatter!(plt2, [μ2[1]], [μ2[2]], color=:black, label="Mean")
+            display(plt2)
+
+            println("=== 3D Error Ellipsoid Example ===")
+            C3 = [2.0 0.5 0.3;
+                  0.5 1.0 0.2;
+                  0.3 0.2 1.5]
+            μ3 = [0.0, 0.0, 0.0]
+            plt3 = error_ellipse(C3, mu=μ3, conf=0.9, style=:blue)
+            display(plt3)
+          end
+
+          # Helper to avoid "diagonal not defined" if using older Julia versions
+          diagonal(v) = Matrix(Diagonal(v))
+
+          # -------------------------------
+          # 3. Run
+          # -------------------------------
+          main()
 
