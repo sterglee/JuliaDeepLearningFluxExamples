@@ -2,14 +2,15 @@
 
 The project aims to demonstrate the Julia's Flux Framework flexibility and performance for Deep Learning applications.
 
-Julia with Flux demonstrated high performance, by far superior to Python scripts that do not exploit optimized libraries. 
-
-However, Tensorflow and highly optimized libraries are usually a little faster.
+Julia with Flux demonstrated high performance, by far superior to Python scripts especially to those that do not exploit optimized libraries!!
 
 The following results approve these facts:
 
  Convolutional neural network:
- Total Duration with Tensorflow CUDA: 44.021000 seconds Julia, 22.048139 δευτερόλεπτα Tensorflow 
+ Julia time: 5.7 sec, Python time: 13.5 sec
 
- Julia Native SVD Benchmark:0.032900 seconds (3.66 k allocations: 11.469 MiB)
- Python Native SVD Time: 5.9220 s
+Multilayer Perceptron:
+ julia time:  1.5 sec, python tensorflow: 3.56 sec
+
+ Julia Native SVD Benchmark:0.032900 sec (3.66 k allocations: 11.469 MiB)
+ Python Native SVD Time: 5.9220 sec
