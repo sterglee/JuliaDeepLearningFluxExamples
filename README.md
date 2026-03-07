@@ -12,11 +12,13 @@ The following results approve these facts:
 Multilayer Perceptron:
  julia time:  1.5 sec, python tensorflow: 3.56 sec
 
- Julia Native SVD Benchmark:0.032900 sec (3.66 k allocations: 11.469 MiB)
- Python Native SVD Time: 5.9220 sec
-
+ 
 Autoencoder:
 Julia with CUDA: 5.1 s
 Python: 22.9 s
 Julia multithread: 10.48
 
+
+
+ Julia Native SVD Benchmark:0.032900 sec (3.66 k allocations: 11.469 MiB)
+ Python Native SVD Time: 5.9220 sec
