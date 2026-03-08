@@ -1,3 +1,3 @@
 ## Description
 
-The project aims to demonstrate the Julia's Flux Framework flexibility and performance for Deep Learning applications.
+Code from the excellent book: "Machine Learning for the Physical Sciences Fundamentals and Prototyping with Julia", By Carlo Requião da Cunha, Copyright 2024
