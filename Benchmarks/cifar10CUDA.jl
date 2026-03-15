@@ -1,5 +1,5 @@
 
-# Total Duration with CUDA: 44.021000 seconds Julia, 22.048139 δευτερόλεπτα Tensorflow 
+# Total Duration with CUDA: 3.75 seconds Julia, 22.048139 secs Tensorflow 
 # Julia Native SVD Benchmark:0.032900 seconds (3.66 k allocations: 11.469 MiB)
 # Python Native SVD Time: 5.9220 s
 
