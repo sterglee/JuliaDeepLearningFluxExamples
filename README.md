@@ -21,3 +21,6 @@ Julia Native SVD Benchmark:0.032900 sec (3.66 k allocations: 11.469 MiB), Python
 Multilayer code from scratch:
   Julia 16 s,  Java 17 s,  C++ 166.17 s
 
+
+The project provides Julia code for several famous books as e.g. Simon Prince, "Understanding Deep Learning", C. Bishop, "Deep Learning", Sergios Theodoridis, "Machine Leraning" etc.
+
