@@ -1,114 +1,171 @@
-# 26.64 secs
-# accuracy  66.67
+using HTTP, Flux, Statistics, Random, LinearAlgebra, GLMakie, Printf
+using Flux: onehotbatch, DataLoader, onecold
 
-using HTTP
-using Flux
-using Flux: onehotbatch, DataLoader, @epochs
-using Statistics
-using MLUtils # For splitobs
+# --- CONSTANTS ---
+const ALPHABET = ['a', 'g', 'c', 't']
+const SEQ_LEN = 57
+const TIMESTEPS = 100
+const β = Float32.(range(1e-4, 0.02, length=TIMESTEPS))
+const α = 1 .- β
+const α_bar = cumprod(α)
 
-# 1. DATA LOADING & PREPROCESSING
+# --- 1. DATA & MODEL ---
 function download_and_preprocess()
-    println("Fetching dataset from UCI...")
     url = "https://archive.ics.uci.edu/ml/machine-learning-databases/molecular-biology/promoter-gene-sequences/promoters.data"
-    
-    # HTTP request inside the function scope
-    response = HTTP.get(url)
-    raw_content = String(response.body)
-    raw_lines = split(strip(raw_content), "\n")
-
-    alphabet = ['a', 'g', 'c', 't']
-    X = []
-    Y = []
-
+    raw_lines = split(strip(String(HTTP.get(url).body)), "\n")
+    X, real_strings = [], String[]
     for line in raw_lines
         parts = split(line, ",")
-        if length(parts) < 3 continue end
-        
-        # Label: + is promoter (class 1), - is non-promoter (class 2)
-        label = strip(parts[1]) == "+" ? 1 : 2
-        
-        # Sequence: clean up whitespace
-        seq = replace(strip(parts[3]), r"\s+" => "")
-        
-        # One-hot encode: resulting in (4, 57)
-        # We lowercase to match the alphabet ['a', 'g', 'c', 't']
-        encoded = Float32.(onehotbatch(collect(lowercase(seq)), alphabet))
-        
-        # Correct dimensions for 1D Conv: (Width/Length, Channels)
-        # Transposing (4, 57) to (57, 4)
-        push!(X, collect(encoded'))
-        push!(Y, onehotbatch(label, 1:2))
+        if length(parts) < 3 || strip(parts[1]) != "+" continue end
+        seq = lowercase(replace(strip(parts[3]), r"\s+" => ""))
+        if length(seq) == 57
+            push!(X, collect(Float32.(onehotbatch(collect(seq), ALPHABET))'))
+            push!(real_strings, seq)
+        end
     end
-
-    # Combine into 3D tensor: (57, 4, 106) -> (Length, Channels, Batch)
-    X_tensor = cat(X..., dims=3)
-    Y_tensor = cat(Y..., dims=2)
-    
-    return X_tensor, Y_tensor
+    return cat(X..., dims=3), real_strings
 end
 
-# 2. MODEL DEFINITION
-function build_model()
+function build_diffusion_model()
     return Chain(
-        # Input shape: (57, 4, Batch)
-        # Conv((filter_size,), in_channels => out_channels)
-        Conv((7,), 4 => 16, relu, pad=SamePad()),
-        MaxPool((2,)), # Reduces sequence length from 57 to 28
-        
-        Conv((3,), 16 => 32, relu, pad=SamePad()),
-        MaxPool((2,)), # Reduces sequence length from 28 to 14
-        
-        Flux.flatten,
-        # Flattened size: 14 (length) * 32 (channels) = 448
-        Dense(448, 16, relu), 
-        Dense(16, 2),
-        softmax
-    )
+        Conv((7,), 5 => 32, relu, pad=SamePad()),
+        Conv((3,), 32 => 64, relu, pad=SamePad()),
+        Conv((3,), 64 => 32, relu, pad=SamePad()),
+        Conv((3,), 32 => 4, pad=SamePad())
+        )
 end
 
-# 3. UTILITIES
-accuracy(m, x, y) = mean(Flux.onecold(m(x)) .== Flux.onecold(y))
+# --- 2. EVALUATION & SALIENCY ---
+function get_saliency_map(model, x_0)
+    t = rand(1:TIMESTEPS)
+    x_t, ϵ_target = add_noise(x_0, t)
+    t_chan = fill(Float32(t/TIMESTEPS), 57, 1, 1)
 
-# 4. MAIN EXECUTION
-function main()
-    # Data Setup
-    X_raw, Y_raw = download_and_preprocess()
-    
-    # Split: 80% Train, 20% Test
-    (x_train, y_train), (x_test, y_test) = splitobs((X_raw, Y_raw), at=0.8)
-    
-    # Create DataLoaders
-    train_loader = DataLoader((x_train, y_train), batchsize=16, shuffle=true)
-    
-    # Initialize Model and Optimizer
-    model = build_model()
-    # Note: Use logitcrossentropy if the model DOES NOT have softmax
-    # Since we have softmax, we'll use crossentropy
-    loss(m, x, y) = Flux.crossentropy(m(x), y)
-    opt_state = Flux.setup(Adam(0.001), model)
+    # Backpropagate to the input x_t to see importance
+    grads = Flux.gradient(x_t) do xt
+        ϵ_pred = model(cat(xt, t_chan, dims=2))
+        sum((ϵ_target .- ϵ_pred).^2)
+    end
+    return abs.(grads[1][:, :, 1])
+end
 
-    println("\n--- Starting Training ---")
-    initial_acc = accuracy(model, x_test, y_test)
-    println("Initial Test Accuracy: $(round(initial_acc*100, digits=2))%")
-
-    for epoch in 1:1000
-        for (x, y) in train_loader
-            # Compute gradient and update weights
-            grads = Flux.gradient(m -> loss(m, x, y), model)
-            Flux.update!(opt_state, model, grads[1])
-        end
-        
-        if epoch % 10 == 0
-            acc = accuracy(model, x_test, y_test)
-            println("Epoch $epoch | Test Accuracy: $(round(acc*100, digits=2))%")
-        end
+function get_kmer_freq(seqs)
+    counts = Dict{String, Float32}()
+    for s in seqs, i in 1:(length(s)-1)
+        k = s[i:i+1]; counts[k] = get(counts, k, 0f0) + 1f0
+    end
+    total = sum(values(counts))
+    return Dict(k => v/total for (k,v) in counts)
     end
 
-    final_acc = accuracy(model, x_test, y_test)
-    println("-----------------------")
-    println("Final Test Accuracy: $(round(final_acc*100, digits=2))%")
-end
+    function print_performance_report(real_seqs, model, X_raw)
+        println("\n" * "="^50)
+        println("          DIFFUSION PERFORMANCE METRICS")
+        println("="^50)
 
-# Final check: call the main function
-@time main()
+        # Denoising Quality (MSE)
+        t_test = rand(1:TIMESTEPS)
+        x_t, ϵ_target = add_noise(X_raw, t_test)
+        t_chan = fill(Float32(t_test/TIMESTEPS), 57, 1, size(X_raw, 3))
+        ϵ_pred = model(cat(x_t, t_chan, dims=2))
+        mse = mean((ϵ_target .- ϵ_pred).^2)
+
+        # Generation Quality
+        synth_seqs = [sample_dna(model) for _ in 1:50]
+            calc_gc(s) = count(c -> c == 'g' || c == 'c', s) / length(s)
+            real_gc = mean(calc_gc.(real_seqs))
+            synth_gc = mean(calc_gc.(synth_seqs))
+
+            # K-mer Similarity (Cosine)
+            r_kmers = get_kmer_freq(real_seqs)
+            s_kmers = get_kmer_freq(synth_seqs)
+            all_k = unique(vcat(collect(keys(r_kmers)), collect(keys(s_kmers))))
+            v_r, v_s = [get(r_kmers, k, 0f0) for k in all_k], [get(s_kmers, k, 0f0) for k in all_k]
+                k_sim = dot(v_r, v_s) / (norm(v_r) * norm(v_s))
+
+                @printf("1. Denoising MSE:           %.6f\n", mse)
+                @printf("2. Real Mean GC:            %.2f%%\n", real_gc * 100)
+                @printf("3. Synth Mean GC:           %.2f%%\n", synth_gc * 100)
+                @printf("4. K-mer Similarity:        %.4f (Target: 1.0)\n", k_sim)
+                @printf("5. Novelty Rate:            %.1f%% unique\n",
+                        (count(s -> !(s in real_seqs), synth_seqs)/50)*100)
+                println("="^50)
+            end
+
+            # --- 3. VISUALIZATION ---
+            function create_visualizations(model, real_seqs, X_raw)
+                println("Generating Visualizations...")
+
+                # Heatmap: Saliency
+                sample_idx = rand(1:size(X_raw, 3))
+                saliency = get_saliency_map(model, X_raw[:, :, sample_idx:sample_idx])
+                fig1 = Figure(resolution = (1000, 450))
+                ax1 = Axis(fig1[1, 1], title="Saliency Map (Base Importance)",
+                           xlabel="Sequence Position", ylabel="Base",
+                           xticks=(1:5:57), yticks=(1:4, ["A","G","C","T"]))
+                hm1 = heatmap!(ax1, 1:57, 1:4, saliency', colormap=:viridis)
+                Colorbar(fig1[1, 2], hm1)
+                save("saliency_mapGAN.png", fig1)
+
+                # Barplot: K-mer Distribution
+                synth_seqs = [sample_dna(model) for _ in 1:50]
+                    r_km = get_kmer_freq(real_seqs); s_km = get_kmer_freq(synth_seqs)
+                    keys_sorted = sort(collect(keys(r_km)))
+
+                    fig2 = Figure(resolution = (800, 400))
+                    ax2 = Axis(fig2[1, 1], title="K-mer Frequency Comparison", xticks=(1:16, keys_sorted))
+                    barplot!(ax2, 1:16, [get(r_km, k, 0f0) for k in keys_sorted], color=(:blue, 0.4), label="Real")
+                        barplot!(ax2, 1:16, [get(s_km, k, 0f0) for k in keys_sorted], color=(:red, 0.4), label="Synth")
+                            axislegend()
+                            save("kmer_comparisonGAN.png", fig2)
+
+                            println("Files saved: saliency_map.png, kmer_comparison.png")
+                        end
+
+                        # --- 4. DIFFUSION LOGIC ---
+                        function add_noise(x_0, t)
+                            ϵ = randn(Float32, size(x_0))
+                            return sqrt(α_bar[t]) .* x_0 .+ sqrt(1 - α_bar[t]) .* ϵ, ϵ
+                        end
+
+                        function sample_dna(model)
+                            x_t = randn(Float32, 57, 4, 1)
+                            for t in TIMESTEPS:-1:1
+                                t_chan = fill(Float32(t/TIMESTEPS), 57, 1, 1)
+                                ϵ_pred = model(cat(x_t, t_chan, dims=2))
+                                c1, c2 = 1/sqrt(α[t]), β[t]/sqrt(1-α_bar[t])
+                                x_t = c1 .* (x_t .- c2 .* ϵ_pred)
+                                if t > 1 x_t .+= sqrt(β[t]) .* randn(Float32, size(x_t)) end
+                            end
+                            return join(ALPHABET[[argmax(x_t[i, :, 1]) for i in 1:SEQ_LEN]])
+                            end
+
+                            # --- 5. MAIN ---
+                            function main()
+                                Random.seed!(42)
+                                X_raw, real_seqs = download_and_preprocess()
+                                model = build_diffusion_model()
+                                opt = Flux.setup(Adam(0.001), model)
+                                loader = DataLoader(X_raw, batchsize=16, shuffle=true)
+
+                                println("Training...")
+                                for epoch in 1:1000
+                                    for x_0 in loader
+                                        t = rand(1:TIMESTEPS)
+                                        x_t, ϵ_target = add_noise(x_0, t)
+                                        t_chan = fill(Float32(t/TIMESTEPS), 57, 1, size(x_0, 3))
+                                        grads = Flux.gradient(model) do m
+                                            ϵ_pred = m(cat(x_t, t_chan, dims=2))
+                                            mean((ϵ_target .- ϵ_pred).^2)
+                                        end
+                                        Flux.update!(opt, model, grads[1])
+                                    end
+                                    if epoch % 200 == 0 println("Epoch $epoch/1000") end
+                                end
+
+                                print_performance_report(real_seqs, model, X_raw)
+                                create_visualizations(model, real_seqs, X_raw)
+                            end
+
+                            main()
+

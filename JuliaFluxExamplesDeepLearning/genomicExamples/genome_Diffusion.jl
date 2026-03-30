@@ -1,156 +1,147 @@
+using HTTP, Flux, Statistics, MLUtils, Random, GLMakie, Printf
+using Flux: onehotbatch, DataLoader, onecold, logitcrossentropy, reset!, crossentropy
+using ChainRulesCore: @ignore_derivatives
 
-#Real Mean GC: 42.14%
-#Synth Mean GC: 41.05%
-# 29.683883 seconds (62.13 M allocations: 35.484 GiB, 6.25% gc time, 38.10% compilation time: 9% of which was recompilation)
-
- using HTTP, Flux, Statistics, Random, LinearAlgebra
-using Flux: onehotbatch, DataLoader, onecold
-
-# ------------------------------------------------------------
-# 1. CONSTANTS & NOISE SCHEDULE
-# ------------------------------------------------------------
-const ALPHABET = ['a', 'g', 'c', 't']
+# --- CONSTANTS ---
+const ALPHABET = ['a','g','c','t']
 const SEQ_LEN = 57
-const TIMESTEPS = 100
-# Linear noise schedule
-const β = Float32.(range(1e-4, 0.02, length=TIMESTEPS))
-const α = 1 .- β
-const α_bar = cumprod(α)
+const DIFFUSION_STEPS = 100
 
 # ------------------------------------------------------------
-# 2. DATA LOADING
+# 1. DATA LOADING & ORACLE PREPARATION
 # ------------------------------------------------------------
-function download_and_preprocess()
-    println("Fetching dataset from UCI...")
+function load_data()
+    println("Fetching UCI Promoter Dataset...")
     url = "https://archive.ics.uci.edu/ml/machine-learning-databases/molecular-biology/promoter-gene-sequences/promoters.data"
-    response = HTTP.get(url)
-    raw_lines = split(strip(String(response.body)), "\n")
+    raw_lines = split(strip(String(HTTP.get(url).body)), "\n")
 
-    X = []
-    real_strings = String[]
-
+    X_prom, X_all, Y_all = [], [], []
     for line in raw_lines
         parts = split(line, ",")
-        if length(parts) < 3 || strip(parts[1]) != "+" continue end
+        if length(parts) < 3 continue end
+        label = strip(parts[1]) == "+" ? 1 : 2
         seq = lowercase(replace(strip(parts[3]), r"\s+" => ""))
         if length(seq) != 57 continue end
 
-        # Reshape to (Width=57, Channels=4) for Flux 1D Conv
         encoded = Float32.(onehotbatch(collect(seq), ALPHABET))
-        push!(X, collect(encoded')) 
-        push!(real_strings, seq)
+        push!(X_all, encoded)
+        push!(Y_all, Flux.onehot(label, 1:2))
+        if label == 1 push!(X_prom, encoded) end
     end
-    return cat(X..., dims=3), real_strings
+    return cat(X_prom..., dims=3), cat(X_all..., dims=3), cat(Y_all..., dims=2)
 end
 
 # ------------------------------------------------------------
-# 3. MODEL ARCHITECTURE
+# 2. MODELS (Oracle Classifier & Denoiser)
 # ------------------------------------------------------------
-function build_diffusion_model()
-    return Chain(
-        # Input: (57, 5, Batch) -> 4 bases + 1 time channel
-        Conv((7,), 5 => 32, relu, pad=SamePad()),
-        Conv((3,), 32 => 64, relu, pad=SamePad()),
-        Conv((3,), 64 => 32, relu, pad=SamePad()),
-        # Output: (57, 4, Batch) -> predicting the noise for the 4 bases
-        Conv((3,), 32 => 4, pad=SamePad()) 
-    )
+# Oracle to judge synthetic quality
+function build_oracle()
+    return Chain(LSTM(4 => 64), x -> x[:, end, :], Dense(64, 2), softmax)
+end
+
+# Diffusion Denoiser
+struct BidirDenoiser; gru_f; gru_b; head; end
+Flux.@functor BidirDenoiser
+function (m::BidirDenoiser)(x, t)
+    t_emb = fill(Float32(t/DIFFUSION_STEPS), 1, size(x, 2), size(x, 3))
+    x_i = vcat(x, t_emb)
+    f, b = m.gru_f(x_i), m.gru_b(reverse(x_i, dims=2))
+    return m.head(vcat(f, reverse(b, dims=2)))
+end
+
+function build_denoiser()
+    h = 64
+    BidirDenoiser(GRU(5 => h), GRU(5 => h),
+                  Chain(Dense(2h, 32, relu), Dense(32, 4), x -> softmax(x, dims=1)))
 end
 
 # ------------------------------------------------------------
-# 4. DIFFUSION LOGIC
+# 3. PERFORMANCE METRICS
 # ------------------------------------------------------------
-function add_noise(x_0, t)
-    ϵ = randn(Float32, size(x_0))
-    x_t = sqrt(α_bar[t]) .* x_0 .+ sqrt(1 - α_bar[t]) .* ϵ
-    return x_t, ϵ
-end
-
-function sample_dna(model)
-    # Start with pure Gaussian noise: (57, 4, 1)
-    x_t = randn(Float32, 57, 4, 1)
-    
-    for t in TIMESTEPS:-1:1
-        # Inject time information
-        t_chan = fill(Float32(t/TIMESTEPS), 57, 1, 1)
-        input = cat(x_t, t_chan, dims=2)
-        
-        ϵ_pred = model(input)
-        
-        # Reverse Step math
-        c1 = 1 / sqrt(α[t])
-        c2 = β[t] / sqrt(1 - α_bar[t])
-        x_t = c1 .* (x_t .- c2 .* ϵ_pred)
-        
-        # Add posterior noise back for sampling variety
-        if t > 1
-            x_t .+= sqrt(β[t]) .* randn(Float32, size(x_t))
-        end
-    end
-    
-    # Argmax back to DNA string
-    indices = [argmax(x_t[i, :, 1]) for i in 1:SEQ_LEN]
-    return join(ALPHABET[indices])
+function calculate_motif_score(seq::String)
+    # Simplified search for -10 (TATAAT) and -35 (TTGACA) with 1 mismatch allowed
+    tata = occursin(r"tataat|tataaa|tataac", seq) ? 0.5 : 0.0
+    ttgaca = occursin(r"ttgaca|ttgact|ttgata", seq) ? 0.5 : 0.0
+    return tata + ttgaca
 end
 
 # ------------------------------------------------------------
-# 5. EVALUATION UTILS
-# ------------------------------------------------------------
-function calculate_mse(model, x_data)
-    t = rand(1:TIMESTEPS)
-    x_t, ϵ_target = add_noise(x_data, t)
-    t_chan = fill(Float32(t/TIMESTEPS), 57, 1, size(x_data, 3))
-    ϵ_pred = model(cat(x_t, t_chan, dims=2))
-    return mean((ϵ_target .- ϵ_pred).^2)
-end
-
-# ------------------------------------------------------------
-# 6. MAIN EXECUTION
+# 4. MAIN EXECUTION
 # ------------------------------------------------------------
 function main()
     Random.seed!(42)
-    X_raw, real_seqs = download_and_preprocess()
-    
-    model = build_diffusion_model()
-    opt_state = Flux.setup(Adam(0.001), model)
-    loader = DataLoader(X_raw, batchsize=16, shuffle=true)
+    X_prom, X_all, Y_all = load_data()
 
-    println("\n--- Training Generative Diffusion Model ---")
-    for epoch in 1:1000
-        for x_0 in loader
-            batch_size = size(x_0, 3)
-            t = rand(1:TIMESTEPS)
-            x_t, ϵ_target = add_noise(x_0, t)
-            
-            t_chan = fill(Float32(t/TIMESTEPS), 57, 1, batch_size)
-            
-            grads = Flux.gradient(model) do m
-                ϵ_pred = m(cat(x_t, t_chan, dims=2))
-                mean((ϵ_target .- ϵ_pred).^2)
+    # Step A: Train Oracle
+    oracle = build_oracle()
+    opt_o = Flux.setup(Adam(0.001), oracle)
+    println("Training Oracle Judge...")
+    for _ in 1:100, (x, y) in DataLoader((X_all, Y_all), batchsize=16, shuffle=true)
+        reset!(oracle)
+        Flux.update!(opt_o, oracle, Flux.gradient(m -> crossentropy(m(x), y), oracle)[1])
+    end
+
+    # Step B: Train Diffusion
+    denoiser = build_denoiser()
+    opt_d = Flux.setup(Adam(0.001), denoiser)
+    loader = DataLoader(X_prom, batchsize=16, shuffle=true)
+
+    loss_hist, prec_hist = Float32[], Float32[]
+
+    println("\n--- Training DNA Diffusion ---")
+    for epoch in 1:600
+        e_loss = 0.0f0
+        for x in loader
+            t = rand(1:DIFFUSION_STEPS)
+            x_noisy = x .* (1f0 - t/DIFFUSION_STEPS) .+ (0.25f0 * t/DIFFUSION_STEPS)
+            grads = Flux.gradient(denoiser) do m
+                reset!(m); pred = m(x_noisy, t)
+                l = mean((pred .- x).^2); @ignore_derivatives e_loss += l; l
             end
-            Flux.update!(opt_state, model, grads[1])
+            Flux.update!(opt_d, denoiser, grads[1])
         end
-        
-        if epoch % 100 == 0
-            loss = calculate_mse(model, X_raw)
-            println("Epoch $epoch | Denoising MSE: $(round(loss, digits=5))")
+
+        if epoch % 50 == 0
+            # Evaluate: Generate 20 sequences and check with Oracle
+            reset!(denoiser); sample = fill(0.25f32, 4, 57, 20)
+            for t in reverse(1:DIFFUSION_STEPS); sample = denoiser(sample, t); end
+
+            reset!(oracle)
+            preds = onecold(oracle(sample))
+            precision = mean(preds .== 1) # Label 1 = Promoter
+
+            push!(loss_hist, e_loss/length(loader))
+            push!(prec_hist, precision * 100)
+            @printf("Epoch %d | Loss: %.6f | Oracle Precision: %.1f%%\n", epoch, loss_hist[end], precision*100)
         end
     end
 
-    println("\n--- Evaluation & Generation ---")
-    println("Generating 3 synthetic promoters:")
-    for i in 1:3
-        println("Gen $i: ", sample_dna(model))
-    end
-    
-    # Quick GC check
-    real_gc = mean([count(c->c=='g'||c=='c', s)/57 for s in real_seqs])
-    synth_seqs = [sample_dna(model) for _ in 1:10]
-    synth_gc = mean([count(c->c=='g'||c=='c', s)/57 for s in synth_seqs])
-    
-    println("\nReal Mean GC: $(round(real_gc*100, digits=2))%")
-    println("Synth Mean GC: $(round(synth_gc*100, digits=2))%")
-end
+    # Final Generation & Motif Check
+    reset!(denoiser); final_probs = fill(0.25f32, 4, 57, 1)
+    for t in reverse(1:DIFFUSION_STEPS); final_probs = denoiser(final_probs, t); end
+    final_seq = join(ALPHABET[[argmax(final_probs[:, i, 1]) for i in 1:57]])
 
-@time main()
+        m_score = calculate_motif_score(final_seq)
+        println("\nGenerated: ", final_seq)
+        println("Motif Score: ", m_score * 100, "% Match")
+
+        # ------------------------------------------------------------
+        # 5. VISUALIZATION
+        # ------------------------------------------------------------
+        fig = Figure(size = (1200, 800))
+        ax1 = Axis(fig[1, 1], title="MSE Training Loss", xlabel="Step", ylabel="Loss")
+        lines!(ax1, loss_hist, color=:red, linewidth=2)
+
+        ax2 = Axis(fig[1, 2], title="Oracle Prediction Accuracy (%)", xlabel="Step", ylabel="Precision")
+        lines!(ax2, prec_hist, color=:blue, linewidth=2)
+
+        ax3 = Axis(fig[2, 1:2], title="Synthetic Sequence Probability Heatmap",
+                   xticks=(1:57, string.(1:57)), yticks=(1:4, ["A","G","C","T"]))
+        heatmap!(ax3, 1:57, 1:4, final_probs[:, :, 1]', colormap=:magma)
+
+        save("diffusion_performance.png", fig)
+        display(fig)
+    end
+
+    @time main()
 

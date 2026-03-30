@@ -1,11 +1,10 @@
-#Epoch 1000 | GAN Precision: 100.0%
-
-#--- Final Generation ---
-#Synthetic Promoter: atgcaaattaattcttgacgtttcatcaaatttaaacacacatcacctcaaatgaat
-# 18.614994 seconds (26.09 M allocations: 8.483 GiB, 6.73% gc time, 22.24% compilation time)
-
-using HTTP, Flux, Statistics, Random, LinearAlgebra
+using HTTP, Flux, Statistics, Random, LinearAlgebra, GLMakie, Printf
 using Flux: onehotbatch, DataLoader, onecold, sigmoid, logitcrossentropy
+
+# --- CONSTANTS ---
+const ALPHABET = ['a', 'g', 'c', 't']
+const SEQ_LEN = 57
+const LATENT_DIM = 10
 
 # ------------------------------------------------------------
 # 1. DATA LOADING
@@ -16,25 +15,22 @@ function download_and_preprocess()
     response = HTTP.get(url)
     raw_lines = split(strip(String(response.body)), "\n")
 
-    alphabet = ['a', 'g', 'c', 't']
-    X_promoters = []
-    X_all = []
-    Y_all = []
+    X_promoters, X_all, Y_all = [], [], []
 
     for line in raw_lines
         parts = split(line, ",")
         if length(parts) < 3 continue end
-        
+
         label = strip(parts[1]) == "+" ? 1 : 2
         seq = lowercase(replace(strip(parts[3]), r"\s+" => ""))
         if length(seq) != 57 continue end
 
-        encoded = Float32.(onehotbatch(collect(seq), alphabet))
+        encoded = Float32.(onehotbatch(collect(seq), ALPHABET))
         encoded_t = collect(encoded') # (57, 4)
-        
+
         push!(X_all, encoded_t)
         push!(Y_all, onehotbatch(label, 1:2))
-        
+
         if label == 1
             push!(X_promoters, encoded_t)
         end
@@ -43,42 +39,23 @@ function download_and_preprocess()
 end
 
 # ------------------------------------------------------------
-# 2. ORACLE CLASSIFIER (To Measure Precision)
+# 2. MODELS (Oracle, Generator, Discriminator)
 # ------------------------------------------------------------
-# This model acts as the "judge" for the GAN's quality
 function build_oracle()
     return Chain(
         Conv((7,), 4 => 16, relu, pad=SamePad()),
         Flux.flatten,
         Dense(57 * 16, 2)
-    )
+        )
 end
 
-function train_oracle(X, Y)
-    model = build_oracle()
-    opt = Flux.setup(Adam(0.001), model)
-    loader = DataLoader((X, Y), batchsize=16, shuffle=true)
-    
-    println("Training Oracle Classifier...")
-    for epoch in 1:50
-        for (x, y) in loader
-            grads = Flux.gradient(m -> logitcrossentropy(m(x), y), model)
-            Flux.update!(opt, model, grads[1])
-        end
-    end
-    return model
-end
-
-# ------------------------------------------------------------
-# 3. GAN MODELS
-# ------------------------------------------------------------
-function build_generator(latent_dim)
+function build_generator()
     return Chain(
-        Dense(latent_dim, 128, relu),
+        Dense(LATENT_DIM, 128, relu),
         Dense(128, 57 * 4),
         x -> reshape(x, 57, 4, :),
         x -> softmax(x, dims=2)
-    )
+        )
 end
 
 function build_discriminator()
@@ -87,65 +64,114 @@ function build_discriminator()
         Flux.flatten,
         Dense(57 * 16, 1),
         sigmoid
-    )
+        )
 end
 
 # ------------------------------------------------------------
-# 4. MAIN & PRECISION MEASUREMENT
+# 3. PERFORMANCE & PLOTTING
+# ------------------------------------------------------------
+function plot_gan_results(history_prec, history_loss, gen_sample)
+    fig = Figure(size = (1200, 800))
+
+    # Plot 1: Oracle Precision
+    ax1 = Axis(fig[1, 1], title="Oracle Precision (%)", xlabel="Evaluation Point", ylabel="% Real")
+    lines!(ax1, history_prec, color=:blue, linewidth=2)
+
+    # Plot 2: Discriminator Loss
+    ax2 = Axis(fig[1, 2], title="Discriminator Loss", xlabel="Evaluation Point", ylabel="Loss")
+    lines!(ax2, history_loss, color=:red, linewidth=2)
+
+    # Plot 3: Probability Heatmap of a Generated Sample
+    ax3 = Axis(fig[2, 1:2], title="Synthetic Promoter Probability Map (Generator Confidence)",
+               xticks=(1:57, string.(1:57)), yticks=(1:4, ["A","G","C","T"]))
+    hm = heatmap!(ax3, 1:57, 1:4, gen_sample[:, :, 1]', colormap=:magma)
+    Colorbar(fig[2, 3], hm)
+
+    save("gan_performance.png", fig)
+    println("\n[System] Visualizations saved to: gan_performance.png")
+    display(fig)
+end
+
+# ------------------------------------------------------------
+# 4. MAIN EXECUTION
 # ------------------------------------------------------------
 function main()
     Random.seed!(42)
-    latent_dim = 10
     X_promoters, X_all, Y_all = download_and_preprocess()
-    
-    # Train the Oracle first so we can judge the GAN
-    oracle = train_oracle(X_all, Y_all)
-    
-    gen = build_generator(latent_dim)
-    disc = build_discriminator()
-    opt_gen = Flux.setup(Adam(0.0002), gen)
-    opt_disc = Flux.setup(Adam(0.0002), disc)
-    
-    loader = DataLoader(X_promoters, batchsize=16, shuffle=true)
 
-    println("\n--- Training GAN ---")
-    for epoch in 1:1000
-        for x_real in loader
-            batch_size = size(x_real, 3)
-            z = randn(Float32, latent_dim, batch_size)
-
-            # Train Discriminator
-            grads_d = Flux.gradient(disc) do d
-                real_loss = mean(-log.(d(x_real) .+ 1f-8))
-                fake_loss = mean(-log.(1f-0 .- d(gen(z)) .+ 1f-8))
-                real_loss + fake_loss
-            end
-            Flux.update!(opt_disc, disc, grads_d[1])
-
-            # Train Generator
-            grads_g = Flux.gradient(gen) do g
-                mean(-log.(disc(g(z)) .+ 1f-8))
-            end
-            Flux.update!(opt_gen, gen, grads_g[1])
-        end
-
-        if epoch % 100 == 0
-            # Calculate Precision: What % of fakes does Oracle think are real?
-            z_test = randn(Float32, latent_dim, 100)
-            fakes = gen(z_test)
-            oracle_preds = onecold(oracle(fakes))
-            # In our data, label 1 is Promoter (+)
-            precision = mean(oracle_preds .== 1)
-            println("Epoch $epoch | GAN Precision: $(round(precision*100, digits=2))%")
+    # 1. Train Oracle Judge
+    oracle = build_oracle()
+    opt_o = Flux.setup(Adam(0.001), oracle)
+    println("Training Oracle Judge...")
+    for epoch in 1:50
+        for (x, y) in DataLoader((X_all, Y_all), batchsize=16, shuffle=true)
+            grads = Flux.gradient(m -> logitcrossentropy(m(x), y), oracle)
+            Flux.update!(opt_o, oracle, grads[1])
         end
     end
 
-    println("\n--- Final Generation ---")
-    z_final = randn(Float32, latent_dim, 1)
-    fake_sample = gen(z_final)
-    alphabet = ['a','g','c','t']
-    indices = [argmax(fake_sample[i, :, 1]) for i in 1:57]
-    println("Synthetic Promoter: ", join(alphabet[indices]))
-end
+    # 2. Initialize GAN
+    gen = build_generator()
+    disc = build_discriminator()
+    opt_g = Flux.setup(Adam(0.0002), gen)
+    opt_d = Flux.setup(Adam(0.0002), disc)
+    loader = DataLoader(X_promoters, batchsize=16, shuffle=true)
 
-@time main()
+    history_prec = Float32[]
+    history_loss = Float32[]
+
+    println("\n--- Training GAN ---")
+    for epoch in 1:1000
+        running_loss = 0.0f0
+        for x_real in loader
+            batch_sz = size(x_real, 3)
+            z = randn(Float32, LATENT_DIM, batch_sz)
+
+            # Update Discriminator
+            grads_d = Flux.gradient(disc) do d
+                l_real = mean(-log.(d(x_real) .+ 1f-8))
+                l_fake = mean(-log.(1f-0 .- d(gen(z)) .+ 1f-8))
+                l_real + l_fake
+            end
+            Flux.update!(opt_d, disc, grads_d[1])
+
+            # Update Generator
+            grads_g = Flux.gradient(gen) do g
+                mean(-log.(disc(g(z)) .+ 1f-8))
+            end
+            Flux.update!(opt_g, gen, grads_g[1])
+
+            # Logging (Safe from AD engine)
+            d_out_real = disc(x_real)
+            d_out_fake = disc(gen(z))
+            running_loss += mean(-log.(d_out_real .+ 1f-8) .- log.(1f-0 .- d_out_fake .+ 1f-8))
+        end
+
+        # Evaluate Performance
+        if epoch % 100 == 0
+            z_test = randn(Float32, LATENT_DIM, 100)
+            fakes = gen(z_test)
+            oracle_preds = onecold(oracle(fakes))
+            precision = mean(oracle_preds .== 1)
+
+            avg_loss = running_loss / length(loader)
+            push!(history_prec, precision * 100)
+            push!(history_loss, avg_loss)
+
+            @printf("Epoch %d | Precision: %.2f%% | D-Loss: %.4f\n", epoch, precision*100, avg_loss)
+        end
+    end
+
+    # 3. Final Generation and Plotting
+    println("\n--- Training Complete ---")
+    z_final = randn(Float32, LATENT_DIM, 1)
+    final_sample = gen(z_final)
+
+    indices = [argmax(final_sample[i, :, 1]) for i in 1:57]
+        println("Generated Sequence: ", join(ALPHABET[indices]))
+
+        plot_gan_results(history_prec, history_loss, final_sample)
+    end
+
+    @time main()
+
